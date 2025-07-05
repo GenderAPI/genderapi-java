@@ -10,23 +10,48 @@ Get Free API Key: [https://app.genderapi.io](https://app.genderapi.io)
 
 ## 🚀 Installation
 
-First, install the SDK in your Maven project. Add the following dependency to your `pom.xml`:
+### Maven (via JitPack)
+
+Add the JitPack repository to your `pom.xml`:
+
+```xml
+<repositories>
+    <repository>
+        <id>jitpack.io</id>
+        <url>https://jitpack.io</url>
+    </repository>
+</repositories>
+```
+
+Then add the dependency:
 
 ```xml
 <dependency>
-    <groupId>io.genderapi</groupId>
-    <artifactId>genderapi</artifactId>
-    <version>1.0.0</version>
+    <groupId>com.github.GenderAPI</groupId>
+    <artifactId>genderapi-java</artifactId>
+    <version>v1.0.3</version>
 </dependency>
 ```
 
-Or if you’re building manually:
+Replace `v1.0.3` with the latest released tag if necessary.
 
-```bash
-mvn clean install
+---
+
+### Gradle (via JitPack)
+
+Add this to your `build.gradle`:
+
+```gradle
+repositories {
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    implementation 'com.github.GenderAPI:genderapi-java:v1.0.3'
+}
 ```
 
-Then import the SDK in your Java code.
+Replace `v1.0.3` with your desired release tag.
 
 ---
 
@@ -165,8 +190,8 @@ Example JSON response for all endpoints:
 | expires           | Integer (timestamp)| Package expiration date (in seconds).              |
 | q                 | String             | Your input query (name, email, or username).       |
 | name              | String             | Found name.                                        |
-| gender            | Enum[String]       | `"male"`, `"female"`, or `"null"`.                |
-| country           | Enum[String]       | Most likely country (e.g. `"US"`, `"DE"`, etc.).  |
+| gender            | Enum[String]       | `"male"`, `"female"`, or `"null"`.                 |
+| country           | Enum[String]       | Most likely country (e.g. `"US"`, `"DE"`, etc.).   |
 | total_names       | Integer            | Number of samples behind the prediction.          |
 | probability       | Integer            | Likelihood percentage (50-100).                   |
 | duration          | String             | Processing time (e.g. `"4ms"`).                   |
