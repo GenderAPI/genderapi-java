@@ -40,6 +40,18 @@ final class Contract {
         return (ObjectNode) value.deepCopy();
     }
 
+    /**
+     * The same example as answered to a recognized API key: {@code meta.access} becomes
+     * {@code {"mode":"api_key","reason":null}}. The published examples are IP-trial responses.
+     */
+    static ObjectNode keyed(String path, String method, String status, String name) {
+        ObjectNode value = example(path, method, status, name);
+        ObjectNode access = (ObjectNode) value.path("meta").path("access");
+        access.put("mode", "api_key");
+        access.putNull("reason");
+        return value;
+    }
+
     static String json(JsonNode node) {
         return node.toString();
     }

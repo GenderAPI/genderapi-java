@@ -8,6 +8,8 @@ package io.genderapi.exception;
  *   <li>{@link GenderApiHttpException}: the API answered with HTTP 4xx/5xx.</li>
  *   <li>{@link GenderApiTransportException}: no usable response (timeout, connection failure,
  *       redirect, malformed body). The billing outcome may be unknown.</li>
+ *   <li>{@link GenderApiAccessModeException}: a key is configured but a successful response reports
+ *       another access mode (e.g. {@code ip_trial}); the request was processed.</li>
  * </ul>
  */
 public class GenderApiException extends RuntimeException {

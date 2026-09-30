@@ -4,7 +4,7 @@ Official GenderAPI.io V2 client for Java (`io.genderapi:genderapi` 2.0.0).
 
 It infers a likely gender from a **name**, **email address** or **username**, and validates phone numbers, through the [GenderAPI.io V2 API](https://www.genderapi.io/api-documentation). Results are inferences and can be `unknown`. They do not verify a person's identity, and the country fields do not establish nationality, residence or ethnicity.
 
-> **1.x (V1) is in maintenance.** The legacy V1 client lives on the [`v1` branch](https://github.com/GenderAPI/genderapi-java/tree/v1) and in the existing 1.x releases. 2.0.0 is a breaking rewrite for the V2 API. See [Migrating from 1.x](#migrating-from-1x).
+> **1.x (V1 API) stays available and installable indefinitely; no deprecation or shutdown is planned.** To keep using it, pin 1.x from JitPack: `com.github.GenderAPI:genderapi-java:v1.0.3` (see [Staying on 1.x](#staying-on-1x)). The source stays on the [`v1` branch](https://github.com/GenderAPI/genderapi-java/tree/v1). 2.0.0 is a breaking rewrite for the V2 API with new coordinates, `io.genderapi:genderapi`. See [Migrating from 1.x](#migrating-from-1x).
 
 - Java 11+ (`java.net.http.HttpClient`), one runtime dependency (Jackson databind)
 - No automatic retries, no redirects, 10-second default timeout
@@ -191,6 +191,7 @@ catalog.getEntry("rate_limit_exceeded").getAction(); // "wait_then_retry"
 | `withoutApiKey()` | | Send no key and ignore the environment variable (IP trial). |
 | `timeout(Duration)` | 10 seconds | Bounds the whole call (connect, send, read). |
 | `baseUrl(String)` | `https://api.genderapi.io/api/v2` | For tests. Must be `https`; plain `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`. |
+| `requireApiKeyAccess(boolean)` | `true` | Only effective when a key is configured. A successful response whose `meta.access.mode` is not `api_key` (usually `ip_trial` because the key was not recognized) throws `GenderApiAccessModeException`. Pass `false` to return such responses normally. Never applies to `capabilities()` or `errorCatalog()`. |
 
 Request fields (wire names are sent exactly as the API defines them):
 
@@ -240,6 +241,7 @@ All exceptions are unchecked and extend `GenderApiException`. Messages never inc
 | `GenderApiValidationException` | Invalid input or configuration, before any request | `getField()` |
 | `GenderApiHttpException` | HTTP 400 or above | `getStatus()`, `getCode()`, `getTitle()`, `getDetail()`, `getAction()`, `getErrors()` (validation pointers), `getRequestId()`, `getRetryAfter()`, `getRetryAfterSeconds()`, `getBillingStatus()`, `getChargedCredits()`, `getRemainingCredits()`, `getBatchItems()`, `getRawBody()` |
 | `GenderApiTransportException` | Timeout, connection failure, 3xx redirect, or a 2xx body that is not a JSON object | `getKind()`, `isTimeout()`, `getStatus()`, `getRequestId()` |
+| `GenderApiAccessModeException` | A key is configured but a successful response reports another access mode (e.g. `ip_trial`); code `unexpected_access_mode` | `getAccessMode()`, `getAccessReason()`, `getResult()` / `getResult(GenderResponse.class)`, `getJson()`, `getUsage()`, `getStatus()`, `getRequestId()` |
 
 ```java
 try {
@@ -260,8 +262,13 @@ try {
     }
 } catch (GenderApiTransportException e) {
     // no usable response: the request may still have completed and been billed
+} catch (GenderApiAccessModeException e) {
+    // the key was not used (e.getAccessMode() is e.g. "ip_trial"); the request was already processed
+    GenderResponse result = e.getResult(GenderResponse.class);
 }
 ```
+
+`GenderApiAccessModeException` is thrown after the request has already been processed: it may have consumed IP-trial credits, and it is not retried. The complete response the method would have returned is on the exception (`getResult()`, typed with `getResult(Class)`, or as JSON with `getJson()`). Check the key; disable the check with `requireApiKeyAccess(false)`.
 
 Match on `getCode()`, never on the human-readable detail. `getRequestId()` comes from `meta.request_id`, then the body's `request_id`, then the `X-Request-ID` header. Proxy failures can return non-JSON bodies; then `getCode()` is `null` and `getRawBody()` holds the response. When every executed batch item fails, the API returns an error status and `getBatchItems()` holds the rows. The public catalog of codes and actions is at `https://api.genderapi.io/api/v2/errors` (`client.errorCatalog()`).
 
@@ -277,7 +284,7 @@ Match on `getCode()`, never on the human-readable detail. `getRequestId()` comes
 
 ## IP trial (no key)
 
-Without an API key the client still works: the server applies the shared IP trial (10 credits per 24 hours; batches of up to 10 items). The SDK implements no trial logic of its own. A missing or unknown key can silently use trial credits, so check `response.getMeta().getAccess().getMode()`: it is `api_key` when your key was used and `ip_trial` otherwise (`getReason()` says why). Disabled, expired or restricted keys are rejected and do not fall back to the trial.
+Without an API key the client still works: the server applies the shared IP trial (10 credits per 24 hours; batches of up to 10 items). The SDK implements no trial logic of its own. A missing or unknown key can silently use trial credits, so check `response.getMeta().getAccess().getMode()`: it is `api_key` when your key was used and `ip_trial` otherwise (`getReason()` says why). When a key is configured, the client does this check for you by default and throws `GenderApiAccessModeException` (with the full result attached) instead of returning a trial response; see `requireApiKeyAccess(boolean)`. Disabled, expired or restricted keys are rejected and do not fall back to the trial.
 
 ## Keep your key on the server
 
@@ -306,7 +313,40 @@ The client is immutable and thread-safe; create one instance and reuse it.
 | OkHttp + Jackson, Java 8 | `java.net.http` + Jackson, Java 11+ |
 | JitPack `com.github.GenderAPI:genderapi-java` | GitHub Packages `io.genderapi:genderapi` (JitPack still possible) |
 
-Your API key and credit balance stay the same. V1 remains available; keep V1 integrations on 1.x until they are migrated.
+Your API key and credit balance stay the same. You can migrate at your own pace.
+
+### Staying on 1.x
+
+1.x (V1 API) stays available and installable indefinitely; no deprecation or shutdown is planned. To keep using it, pin 1.x from JitPack. The source stays on the [`v1` branch](https://github.com/GenderAPI/genderapi-java/tree/v1). Note that 2.0 uses different coordinates (`io.genderapi:genderapi`), so the two do not replace each other by accident.
+
+Maven:
+
+```xml
+<repositories>
+  <repository>
+    <id>jitpack.io</id>
+    <url>https://jitpack.io</url>
+  </repository>
+</repositories>
+
+<dependency>
+  <groupId>com.github.GenderAPI</groupId>
+  <artifactId>genderapi-java</artifactId>
+  <version>v1.0.3</version>
+</dependency>
+```
+
+Gradle:
+
+```groovy
+repositories {
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    implementation 'com.github.GenderAPI:genderapi-java:v1.0.3'
+}
+```
 
 ## Documentation
 

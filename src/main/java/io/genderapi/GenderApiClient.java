@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.genderapi.exception.GenderApiAccessModeException;
 import io.genderapi.exception.GenderApiException;
 import io.genderapi.exception.GenderApiHttpException;
 import io.genderapi.exception.GenderApiTransportException;
@@ -13,6 +14,7 @@ import io.genderapi.exception.GenderApiValidationException;
 import io.genderapi.model.BatchResponse;
 import io.genderapi.model.ErrorCatalog;
 import io.genderapi.model.GenderResponse;
+import io.genderapi.model.JsonBacked;
 import io.genderapi.model.PhoneResponse;
 import io.genderapi.model.UsageResponse;
 
@@ -54,6 +56,9 @@ import java.util.function.Function;
  *   <li>HTTPS only, except {@code http://localhost}, {@code 127.0.0.1} or {@code [::1]} for tests.</li>
  *   <li>The key is sent only as {@code Authorization: Bearer}, never in a URL, and never logged.</li>
  *   <li>Constructing the client makes no request.</li>
+ *   <li>When a key is configured, a successful response that reports another access mode (e.g.
+ *       {@code ip_trial}) raises {@link GenderApiAccessModeException}; see
+ *       {@link Builder#requireApiKeyAccess(boolean)}.</li>
  * </ul>
  *
  * <p>Without an API key the server applies the shared IP trial (10 credits per 24 hours); check
@@ -79,6 +84,7 @@ public final class GenderApiClient {
     private final String apiKey;
     private final String baseUrl;
     private final Duration timeout;
+    private final boolean requireApiKeyAccess;
     private final HttpClient http;
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -102,6 +108,7 @@ public final class GenderApiClient {
         this.apiKey = builder.withoutApiKey || isBlank(key) ? null : checkApiKey(key.trim());
         this.baseUrl = checkBaseUrl(builder.baseUrl);
         this.timeout = builder.timeout;
+        this.requireApiKeyAccess = builder.requireApiKeyAccess;
         this.http = HttpClient.newBuilder()
                 .followRedirects(HttpClient.Redirect.NEVER)
                 .version(HttpClient.Version.HTTP_1_1)
@@ -124,13 +131,15 @@ public final class GenderApiClient {
      * @throws GenderApiValidationException before any network call if the request is invalid
      * @throws GenderApiHttpException       on HTTP 4xx/5xx
      * @throws GenderApiTransportException  on timeout, connection failure, redirect or malformed body
+     * @throws GenderApiAccessModeException a key is configured but the response reports another access
+     *                                      mode (the request was processed; the result is on the exception)
      */
     public GenderResponse gender(GenderRequest request) {
         if (request == null) {
             throw new GenderApiValidationException("request", "request is required");
         }
         request.validate();
-        return new GenderResponse(send("/gender", request.toJson(), true));
+        return call("/gender", request.toJson(), GenderResponse::new);
     }
 
     /**
@@ -216,7 +225,7 @@ public final class GenderApiClient {
             }
             array.add(item.toJson());
         }
-        return new BatchResponse(send("/gender/batch", body, true));
+        return call("/gender/batch", body, BatchResponse::new);
     }
 
     public BatchResponse genderBatch(GenderRequest... items) {
@@ -227,7 +236,7 @@ public final class GenderApiClient {
 
     /** @return {@code GET /usage}: the free balance and quota read */
     public UsageResponse usage() {
-        return new UsageResponse(send("/usage", null, true));
+        return call("/usage", null, UsageResponse::new);
     }
 
     /**
@@ -253,17 +262,17 @@ public final class GenderApiClient {
         if (country != null) {
             body.put("country", country);
         }
-        return new PhoneResponse(send("/phone/validate", body, true));
+        return call("/phone/validate", body, PhoneResponse::new);
     }
 
     /** @return {@code GET /}: deployment version, limits and AI availability (sent without credentials) */
     public JsonNode capabilities() {
-        return send("", null, false);
+        return send("", null, false).json;
     }
 
     /** @return {@code GET /errors}: the public error catalog (sent without credentials) */
     public ErrorCatalog errorCatalog() {
-        return new ErrorCatalog(send("/errors", null, false));
+        return new ErrorCatalog(send("/errors", null, false).json);
     }
 
     // ------------------------------------------------------------------ accessors
@@ -281,6 +290,11 @@ public final class GenderApiClient {
         return timeout;
     }
 
+    /** @return whether a key is configured and non-API-key access raises {@link GenderApiAccessModeException} */
+    public boolean requiresApiKeyAccess() {
+        return apiKey != null && requireApiKeyAccess;
+    }
+
     @Override
     public String toString() {
         return "GenderApiClient{baseUrl=" + baseUrl + ", apiKey=" + (apiKey == null ? "<none>" : "<redacted>")
@@ -289,7 +303,39 @@ public final class GenderApiClient {
 
     // ------------------------------------------------------------------ transport
 
-    private JsonNode send(String path, ObjectNode body, boolean authenticate) {
+    /** A parsed 2xx JSON object with the response context needed for errors. */
+    private static final class Reply {
+        final JsonNode json;
+        final int status;
+        final String headerRequestId;
+
+        Reply(JsonNode json, int status, String headerRequestId) {
+            this.json = json;
+            this.status = status;
+            this.headerRequestId = headerRequestId;
+        }
+    }
+
+    /** Sends an authenticated request, wraps the body and applies the access-mode check. */
+    private <T extends JsonBacked> T call(String path, ObjectNode body, Function<JsonNode, T> factory) {
+        Reply reply = send(path, body, true);
+        T result = factory.apply(reply.json);
+        if (apiKey != null && requireApiKeyAccess) {
+            JsonNode meta = reply.json.get("meta");
+            JsonNode access = meta != null && meta.isObject() ? meta.get("access") : null;
+            JsonNode mode = access != null && access.isObject() ? access.get("mode") : null;
+            if (mode != null && !mode.isNull() && !(mode.isTextual() && "api_key".equals(mode.asText()))) {
+                JsonNode reason = access.get("reason");
+                throw new GenderApiAccessModeException(result,
+                        mode.isTextual() ? mode.asText() : mode.toString(),
+                        reason != null && reason.isTextual() ? reason.asText() : null,
+                        reply.status, reply.headerRequestId);
+            }
+        }
+        return result;
+    }
+
+    private Reply send(String path, ObjectNode body, boolean authenticate) {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(baseUrl + path))
                 .timeout(timeout)
                 .header("Accept", "application/json")
@@ -343,7 +389,7 @@ public final class GenderApiClient {
                         + "Check usage() before sending a new request.", null, null, cause);
     }
 
-    private JsonNode handle(HttpResponse<byte[]> response) {
+    private Reply handle(HttpResponse<byte[]> response) {
         int status = response.statusCode();
         String headerRequestId = response.headers().firstValue("X-Request-ID").orElse(null);
         String retryAfter = response.headers().firstValue("Retry-After").orElse(null);
@@ -374,7 +420,7 @@ public final class GenderApiClient {
                     "GenderAPI returned HTTP " + status + " without a JSON object; the billing outcome may be unknown. "
                             + "Keep the request ID and check usage() before retrying.", status, headerRequestId, null);
         }
-        return json;
+        return new Reply(json, status, headerRequestId);
     }
 
     // ------------------------------------------------------------------ configuration checks
@@ -430,6 +476,7 @@ public final class GenderApiClient {
         private boolean withoutApiKey;
         private String baseUrl = DEFAULT_BASE_URL;
         private Duration timeout = DEFAULT_TIMEOUT;
+        private boolean requireApiKeyAccess = true;
         private Function<String, String> environment = System::getenv;
 
         private Builder() {
@@ -477,6 +524,22 @@ public final class GenderApiClient {
                 throw new GenderApiValidationException("timeout", "timeout must be positive");
             }
             this.timeout = timeout;
+            return this;
+        }
+
+        /**
+         * When {@code true} (the default) and an API key is configured, a successful response whose
+         * {@code meta.access.mode} is present and not {@code api_key} (usually {@code ip_trial}
+         * because the key was not recognized) raises {@link GenderApiAccessModeException}. The request
+         * has then already been processed and may have consumed IP-trial credits; the full result is
+         * on the exception. Has no effect without a key and never applies to {@code capabilities()}
+         * or {@code errorCatalog()}.
+         *
+         * @param requireApiKeyAccess {@code false} to return such responses normally
+         * @return this builder
+         */
+        public Builder requireApiKeyAccess(boolean requireApiKeyAccess) {
+            this.requireApiKeyAccess = requireApiKeyAccess;
             return this;
         }
 

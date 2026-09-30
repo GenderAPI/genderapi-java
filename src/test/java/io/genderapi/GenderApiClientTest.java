@@ -3,6 +3,7 @@ package io.genderapi;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.genderapi.StubServer.Reply;
+import io.genderapi.exception.GenderApiAccessModeException;
 import io.genderapi.exception.GenderApiException;
 import io.genderapi.exception.GenderApiHttpException;
 import io.genderapi.exception.GenderApiTransportException;
@@ -58,6 +59,11 @@ class GenderApiClientTest {
         stub.respond(Reply.json(Integer.parseInt(status), Contract.json(Contract.example(path, "post", status, name))));
     }
 
+    /** Success example as answered to a recognized key ({@code meta.access.mode = api_key}). */
+    private void respondKeyed(String path, String method, String name) {
+        stub.respond(Reply.json(200, Contract.json(Contract.keyed(path, method, "200", name))));
+    }
+
     private JsonNode sentBody() throws Exception {
         return Contract.MAPPER.readTree(stub.only().body);
     }
@@ -66,7 +72,7 @@ class GenderApiClientTest {
 
     @Test
     void datasetResultIsParsedWithoutConvertingConfidence() throws Exception {
-        respondExample("/api/v2/gender", "200", "dataset");
+        respondKeyed("/api/v2/gender", "post", "dataset");
 
         GenderResponse response = client.gender(GenderRequest.name("Onur").country("TR").aiMode(AiMode.OFF));
 
@@ -87,8 +93,9 @@ class GenderApiClientTest {
         assertEquals("Onur", data.getInput().getValue());
 
         assertEquals("11111111-1111-4111-8111-111111111111", response.getMeta().getRequestId());
-        assertEquals("ip_trial", response.getMeta().getAccess().getMode());
-        assertEquals("api_key_missing", response.getMeta().getAccess().getReason());
+        assertEquals("api_key", response.getMeta().getAccess().getMode());
+        assertTrue(response.getMeta().getAccess().isApiKey());
+        assertNull(response.getMeta().getAccess().getReason());
         assertEquals("confirmed", response.getMeta().getUsage().getBillingStatus());
         assertEquals(1, response.getMeta().getUsage().getChargedCredits());
         assertEquals(9L, response.getMeta().getUsage().getRemainingCredits());
@@ -105,7 +112,7 @@ class GenderApiClientTest {
 
     @Test
     void aiAliasResultKeepsNullSampleCountAndNegativeBalance() throws Exception {
-        respondExample("/api/v2/gender", "200", "alias");
+        respondKeyed("/api/v2/gender", "post", "alias");
 
         GenderResponse response = client.gender(
                 GenderRequest.username("prenses").country("TR").forceToGenderize(true));
@@ -130,7 +137,7 @@ class GenderApiClientTest {
 
     @Test
     void unknownResultIsASuccessfulResponse() {
-        respondExample("/api/v2/gender", "200", "unknown");
+        respondKeyed("/api/v2/gender", "post", "unknown");
 
         GenderResponse response = client.name("zzzxxyy");
 
@@ -149,7 +156,7 @@ class GenderApiClientTest {
 
     @Test
     void convenienceMethodsSendExactWireFields() throws Exception {
-        respondExample("/api/v2/gender", "200", "dataset");
+        respondKeyed("/api/v2/gender", "post", "dataset");
 
         client.email("alex@example.com", "US");
         client.username("alex_dev");
@@ -172,7 +179,7 @@ class GenderApiClientTest {
 
     @Test
     void unknownFieldsAreToleratedAndKept() {
-        ObjectNode body = Contract.example("/api/v2/gender", "post", "200", "dataset");
+        ObjectNode body = Contract.keyed("/api/v2/gender", "post", "200", "dataset");
         body.put("future_top", 1);
         ((ObjectNode) body.get("data")).put("future_field", "x");
         ((ObjectNode) body.get("data").get("match")).put("distance", 0);
@@ -194,7 +201,7 @@ class GenderApiClientTest {
 
     @Test
     void sendsBearerKeyAndHeadersButNeverTheKeyInTheUrl() {
-        respondExample("/api/v2/gender", "200", "dataset");
+        respondKeyed("/api/v2/gender", "post", "dataset");
 
         client.name("Onur");
 
@@ -222,7 +229,7 @@ class GenderApiClientTest {
 
     @Test
     void readsKeyFromEnvironmentUnlessDisabled() {
-        respondExample("/api/v2/gender", "200", "dataset");
+        respondKeyed("/api/v2/gender", "post", "dataset");
         GenderApiClient fromEnv = clientBuilder()
                 .environment(name -> GenderApiClient.API_KEY_ENV.equals(name) ? KEY : null).build();
         GenderApiClient ignoringEnv = clientBuilder()
@@ -247,11 +254,114 @@ class GenderApiClientTest {
         assertFalse(invalid.getMessage().contains(KEY));
     }
 
+    // ------------------------------------------------------------------ access-mode check
+
+    @Test
+    void keyAnsweredThroughIpTrialThrowsWithTheFullResult() {
+        ObjectNode body = Contract.example("/api/v2/gender", "post", "200", "dataset");
+        ((ObjectNode) body.path("meta").path("access")).put("reason", "api_key_invalid");
+        stub.respond(Reply.json(200, body.toString()).header("X-Request-ID", "hdr-id"));
+
+        GenderApiAccessModeException error = assertThrows(GenderApiAccessModeException.class, () -> client.name("Onur"));
+
+        assertTrue(error instanceof GenderApiException);
+        assertEquals("unexpected_access_mode", error.getCode());
+        assertEquals("ip_trial", error.getAccessMode());
+        assertEquals("api_key_invalid", error.getAccessReason());
+        assertEquals(200, error.getStatus());
+        assertEquals("11111111-1111-4111-8111-111111111111", error.getRequestId());
+        assertEquals("Expected API-key access but the response reports access mode \"ip_trial\". "
+                + "Check your API key; this request may have consumed IP-trial credits.", error.getMessage());
+        assertFalse(error.getMessage().contains(KEY));
+        assertTrue(error.getResult() instanceof GenderResponse);
+        GenderResponse result = error.getResult(GenderResponse.class);
+        assertEquals("male", result.getData().getGender());
+        assertEquals(1, result.getMeta().getUsage().getChargedCredits());
+        assertEquals(body, error.getJson());
+        assertEquals("confirmed", error.getUsage().getBillingStatus());
+        assertEquals(1, stub.requests().size(), "exactly one request, no retry");
+        assertTrue(client.requiresApiKeyAccess());
+    }
+
+    @Test
+    void ipTrialResponseWithoutKeyReturnsNormally() {
+        respondExample("/api/v2/gender", "200", "dataset");
+        GenderApiClient trial = clientBuilder().build();
+
+        assertFalse(trial.requiresApiKeyAccess());
+        assertEquals("ip_trial", trial.name("Onur").getMeta().getAccess().getMode());
+    }
+
+    @Test
+    void accessCheckCanBeDisabled() {
+        respondExample("/api/v2/gender", "200", "dataset");
+        GenderApiClient lenient = clientBuilder().apiKey(KEY).requireApiKeyAccess(false).build();
+
+        assertFalse(lenient.requiresApiKeyAccess());
+        GenderResponse response = lenient.name("Onur");
+
+        assertEquals("ip_trial", response.getMeta().getAccess().getMode());
+        assertEquals("Bearer " + KEY, stub.only().header("Authorization"));
+    }
+
+    @Test
+    void missingAccessModeDoesNotThrow() {
+        ObjectNode body = Contract.example("/api/v2/gender", "post", "200", "dataset");
+        ((ObjectNode) body.path("meta")).remove("access");
+        stub.respond(Reply.json(200, body.toString()));
+
+        assertEquals("male", client.name("Onur").getData().getGender());
+    }
+
+    @Test
+    void batchUsageAndPhoneAnsweredThroughIpTrialThrow() {
+        stub.respond(Reply.json(200, Contract.json(Contract.example("/api/v2/gender/batch", "post", "200", "batch"))));
+        GenderApiAccessModeException batch = assertThrows(GenderApiAccessModeException.class,
+                () -> client.genderBatch(GenderRequest.name("Onur"), GenderRequest.name("Alex")));
+        assertEquals("ip_trial", batch.getAccessMode());
+        BatchResponse items = batch.getResult(BatchResponse.class);
+        assertEquals(3, items.getItems().size());
+        assertEquals(1, items.getFailedItems().size());
+
+        stub.respond(Reply.json(200, Contract.json(Contract.example("/api/v2/usage", "get", "200", "usage"))));
+        assertTrue(assertThrows(GenderApiAccessModeException.class, () -> client.usage()).getResult() instanceof UsageResponse);
+
+        stub.respond(Reply.json(200, Contract.json(Contract.example("/api/v2/phone/validate", "post", "200", "phone"))));
+        assertTrue(assertThrows(GenderApiAccessModeException.class,
+                () -> client.validatePhone("+90 555 000 00 00")).getResult() instanceof PhoneResponse);
+        assertEquals(3, stub.requests().size());
+    }
+
+    @Test
+    void capabilitiesAndErrorCatalogAreNeverAccessChecked() {
+        ObjectNode trialMeta = Contract.MAPPER.createObjectNode();
+        trialMeta.putObject("meta").putObject("access").put("mode", "ip_trial");
+        stub.respond(r -> {
+            ObjectNode body = r.path.equals("/api/v2/errors")
+                    ? (ObjectNode) readTree(Contract.errorCatalogBody())
+                    : Contract.MAPPER.createObjectNode().put("version", "2");
+            body.setAll(trialMeta);
+            return Reply.json(200, body.toString());
+        });
+
+        assertEquals("2", client.capabilities().path("version").asText());
+        assertTrue(client.errorCatalog().getErrors().size() >= 30);
+        assertEquals(2, stub.requests().size());
+    }
+
+    private static JsonNode readTree(String json) {
+        try {
+            return Contract.MAPPER.readTree(json);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     // ------------------------------------------------------------------ batch
 
     @Test
     void partialBatchSuccessReturnsNormallyAndExposesFailedItems() throws Exception {
-        stub.respond(Reply.json(200, Contract.json(Contract.example("/api/v2/gender/batch", "post", "200", "batch"))));
+        respondKeyed("/api/v2/gender/batch", "post", "batch");
 
         BatchResponse response = client.genderBatch(
                 GenderRequest.name("Onur").country("TR").id("known"),
@@ -466,7 +576,7 @@ class GenderApiClientTest {
 
     @Test
     void timeoutRaisesTransportErrorAndDoesNotRetry() {
-        stub.respond(Reply.json(200, Contract.json(Contract.example("/api/v2/gender", "post", "200", "dataset"))).delay(3000));
+        stub.respond(Reply.json(200, Contract.json(Contract.keyed("/api/v2/gender", "post", "200", "dataset"))).delay(3000));
         GenderApiClient fast = clientBuilder().apiKey(KEY).timeout(Duration.ofMillis(300)).build();
 
         long start = System.nanoTime();
@@ -585,11 +695,11 @@ class GenderApiClientTest {
 
     @Test
     void boundaryValuesAreAccepted() {
-        respondExample("/api/v2/gender", "200", "dataset");
+        respondKeyed("/api/v2/gender", "post", "dataset");
         client.name(String.join("", Collections.nCopies(254, "a")));
         client.gender(GenderRequest.name("Onur").id(String.join("", Collections.nCopies(64, "i"))));
         client.gender(GenderRequest.name("Onur").aiMode(AiMode.FALLBACK).forceToGenderize(true));
-        stub.respond(Reply.json(200, Contract.json(Contract.example("/api/v2/gender/batch", "post", "200", "batch"))));
+        respondKeyed("/api/v2/gender/batch", "post", "batch");
         client.genderBatch(Collections.nCopies(50, GenderRequest.name("Onur")));
         assertEquals(4, stub.requests().size());
     }
@@ -598,7 +708,7 @@ class GenderApiClientTest {
 
     @Test
     void usageIsAnAuthenticatedGet() {
-        stub.respond(Reply.json(200, Contract.json(Contract.example("/api/v2/usage", "get", "200", "usage"))));
+        respondKeyed("/api/v2/usage", "get", "usage");
 
         UsageResponse usage = client.usage();
 
@@ -615,7 +725,7 @@ class GenderApiClientTest {
 
     @Test
     void validatePhoneSendsNumberAndCountry() throws Exception {
-        stub.respond(Reply.json(200, Contract.json(Contract.example("/api/v2/phone/validate", "post", "200", "phone"))));
+        respondKeyed("/api/v2/phone/validate", "post", "phone");
 
         PhoneResponse response = client.validatePhone("+90 (555) 000-0000", "TR");
 
