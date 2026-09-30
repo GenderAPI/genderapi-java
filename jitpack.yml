@@ -1,0 +1,3 @@
+# JitPack builds tags on demand (alternative to GitHub Packages; see README).
+jdk:
+  - openjdk17
